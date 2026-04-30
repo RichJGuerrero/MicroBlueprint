@@ -35,6 +35,13 @@ struct MicroBlueprintApp: App {
                     .keyboardShortcut("u", modifiers: [.command])
                 Button("Highlight") { editorController.highlight() }
                     .keyboardShortcut("h", modifiers: [.command, .shift])
+                Menu("Highlight Color") {
+                    ForEach(HighlightColor.allCases) { color in
+                        Button(color.title) {
+                            editorController.selectHighlightColor(color)
+                        }
+                    }
+                }
                 Divider()
                 Button("Toggle Study Mode") {
                     store.studyMode.toggle()

@@ -1,9 +1,37 @@
 import AppKit
 import Combine
 
+enum HighlightColor: String, CaseIterable, Identifiable {
+    case yellow
+    case green
+    case blue
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .yellow: "Yellow"
+        case .green: "Green"
+        case .blue: "Blue"
+        }
+    }
+
+    var nsColor: NSColor {
+        switch self {
+        case .yellow:
+            NSColor.systemYellow.withAlphaComponent(0.45)
+        case .green:
+            NSColor.systemGreen.withAlphaComponent(0.35)
+        case .blue:
+            NSColor.systemBlue.withAlphaComponent(0.30)
+        }
+    }
+}
+
 @MainActor
 final class EditorController: ObservableObject {
     weak var textView: NSTextView?
+    @Published var activeHighlightColor: HighlightColor = .yellow
 
     func focusEditor() {
         guard let textView else { return }
@@ -39,7 +67,11 @@ final class EditorController: ObservableObject {
     }
 
     func highlight() {
-        applyAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.45))
+        toggleHighlight(activeHighlightColor)
+    }
+
+    func selectHighlightColor(_ color: HighlightColor) {
+        activeHighlightColor = color
     }
 
     func removeHighlight() {
@@ -54,6 +86,21 @@ final class EditorController: ObservableObject {
         }
         applyStorageEdit(to: textView, range: range) {
             storage.removeAttribute(.backgroundColor, range: range)
+        }
+    }
+
+    private func toggleHighlight(_ color: HighlightColor) {
+        guard let textView = editableTextView(), let storage = textView.textStorage else { return }
+        let range = effectiveSelection(in: textView)
+        guard range.length > 0 else { return }
+
+        let shouldRemove = storage.rangeContainsHighlight(range)
+        applyStorageEdit(to: textView, range: range) {
+            if shouldRemove {
+                storage.removeAttribute(.backgroundColor, range: range)
+            } else {
+                storage.addAttribute(.backgroundColor, value: color.nsColor, range: range)
+            }
         }
     }
 
@@ -269,6 +316,17 @@ final class EditorController: ObservableObject {
 }
 
 private extension NSTextStorage {
+    func rangeContainsHighlight(_ range: NSRange) -> Bool {
+        var containsHighlight = false
+        enumerateAttribute(.backgroundColor, in: range) { value, _, stop in
+            if value != nil {
+                containsHighlight = true
+                stop.pointee = true
+            }
+        }
+        return containsHighlight
+    }
+
     func range(_ range: NSRange, containsFontTrait trait: NSFontTraitMask) -> Bool {
         var containsTrait = true
         enumerateAttribute(.font, in: range) { value, _, stop in

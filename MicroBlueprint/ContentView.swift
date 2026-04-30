@@ -96,7 +96,14 @@ private struct TopBar: View {
             editorButton("underline", help: "Underline") { editorController.underline() }
             editorButton("list.bullet", help: "Bullet list") { editorController.toggleBullets() }
             editorButton("textformat.size", help: "Heading") { editorController.heading() }
-            editorButton("highlighter", help: "Highlight") { editorController.highlight() }
+            HStack(spacing: 2) {
+                editorButton("highlighter", help: "Apply or remove highlight") {
+                    editorController.highlight()
+                }
+
+                HighlightColorMenu()
+            }
+            .disabled(store.studyMode || store.selectedNote == nil)
 
             Spacer(minLength: 16)
 
@@ -122,6 +129,34 @@ private struct TopBar: View {
         }
         .help(help)
         .disabled(store.studyMode || store.selectedNote == nil)
+    }
+}
+
+private struct HighlightColorMenu: View {
+    @EnvironmentObject private var editorController: EditorController
+
+    var body: some View {
+        Menu {
+            ForEach(HighlightColor.allCases) { color in
+                Button {
+                    editorController.selectHighlightColor(color)
+                } label: {
+                    Label(color.title, systemImage: color == editorController.activeHighlightColor ? "checkmark.circle.fill" : "circle.fill")
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Circle()
+                    .fill(Color(nsColor: editorController.activeHighlightColor.nsColor))
+                    .frame(width: 9, height: 9)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+            }
+            .frame(width: 25, height: 24)
+        }
+        .menuStyle(.button)
+        .fixedSize()
+        .help("Choose highlight color")
     }
 }
 
