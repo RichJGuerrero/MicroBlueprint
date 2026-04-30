@@ -5,6 +5,7 @@ enum HighlightColor: String, CaseIterable, Identifiable {
     case yellow
     case green
     case blue
+    case pink
 
     var id: String { rawValue }
 
@@ -13,6 +14,7 @@ enum HighlightColor: String, CaseIterable, Identifiable {
         case .yellow: "Yellow"
         case .green: "Green"
         case .blue: "Blue"
+        case .pink: "Pink"
         }
     }
 
@@ -24,6 +26,8 @@ enum HighlightColor: String, CaseIterable, Identifiable {
             NSColor.systemGreen.withAlphaComponent(0.35)
         case .blue:
             NSColor.systemBlue.withAlphaComponent(0.30)
+        case .pink:
+            NSColor.systemPink.withAlphaComponent(0.35)
         }
     }
 }
@@ -94,11 +98,12 @@ final class EditorController: ObservableObject {
         let range = effectiveSelection(in: textView)
         guard range.length > 0 else { return }
 
-        let shouldRemove = storage.rangeContainsHighlight(range)
+        let shouldRemove = storage.rangeIsUniformlyHighlighted(range, with: color.nsColor)
         applyStorageEdit(to: textView, range: range) {
             if shouldRemove {
                 storage.removeAttribute(.backgroundColor, range: range)
             } else {
+                storage.removeAttribute(.backgroundColor, range: range)
                 storage.addAttribute(.backgroundColor, value: color.nsColor, range: range)
             }
         }
@@ -316,15 +321,17 @@ final class EditorController: ObservableObject {
 }
 
 private extension NSTextStorage {
-    func rangeContainsHighlight(_ range: NSRange) -> Bool {
-        var containsHighlight = false
+    func rangeIsUniformlyHighlighted(_ range: NSRange, with color: NSColor) -> Bool {
+        var isUniform = range.length > 0
         enumerateAttribute(.backgroundColor, in: range) { value, _, stop in
-            if value != nil {
-                containsHighlight = true
+            guard let runColor = value as? NSColor,
+                  runColor.isVisuallyEqual(to: color) else {
+                isUniform = false
                 stop.pointee = true
+                return
             }
         }
-        return containsHighlight
+        return isUniform
     }
 
     func range(_ range: NSRange, containsFontTrait trait: NSFontTraitMask) -> Bool {
@@ -352,5 +359,20 @@ private extension NSTextStorage {
             }
         }
         return containsAttribute
+    }
+}
+
+private extension NSColor {
+    func isVisuallyEqual(to other: NSColor) -> Bool {
+        guard let lhs = usingColorSpace(.sRGB),
+              let rhs = other.usingColorSpace(.sRGB) else {
+            return isEqual(other)
+        }
+
+        let tolerance = 0.01
+        return abs(lhs.redComponent - rhs.redComponent) < tolerance
+            && abs(lhs.greenComponent - rhs.greenComponent) < tolerance
+            && abs(lhs.blueComponent - rhs.blueComponent) < tolerance
+            && abs(lhs.alphaComponent - rhs.alphaComponent) < tolerance
     }
 }
