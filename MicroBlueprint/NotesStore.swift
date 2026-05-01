@@ -6,6 +6,8 @@ enum FolderScope: Equatable {
     case all
     case unfiled
     case folder(UUID)
+    case reviewDue
+    case tagged(String)
 }
 
 @MainActor
@@ -18,6 +20,7 @@ final class NotesStore: ObservableObject {
     @Published var studyMode = false
     @Published var showLeftPanel = true
     @Published var showRightPanel = true
+    @Published var shouldFocusTitle = false
 
     private let storageURL: URL
     private var saveTask: Task<Void, Never>?
@@ -27,27 +30,36 @@ final class NotesStore: ObservableObject {
         load()
     }
 
+    // MARK: - Derived state
+
     var selectedNote: BlueprintNote? {
         guard let selectedNoteID else { return nil }
         return notes.first { $0.id == selectedNoteID }
     }
 
     var selectedFolderID: UUID? {
-        if case .folder(let id) = folderScope {
-            return id
-        }
+        if case .folder(let id) = folderScope { return id }
         return nil
+    }
+
+    /// All unique tags across every note, sorted alphabetically.
+    var allTags: [String] {
+        Array(Set(notes.flatMap(\.tags))).sorted()
+    }
+
+    /// Number of notes currently due for review.
+    var reviewDueCount: Int {
+        notes.filter(\.isDueForReview).count
     }
 
     var filteredNotes: [BlueprintNote] {
         let scoped = notes.filter { note in
             switch folderScope {
-            case .all:
-                true
-            case .unfiled:
-                note.folderID == nil
-            case .folder(let folderID):
-                note.folderID == folderID
+            case .all:              return true
+            case .unfiled:          return note.folderID == nil
+            case .folder(let id):   return note.folderID == id
+            case .reviewDue:        return note.isDueForReview
+            case .tagged(let tag):  return note.tags.contains(tag)
             }
         }
 
@@ -60,6 +72,7 @@ final class NotesStore: ObservableObject {
             .filter {
                 $0.title.localizedCaseInsensitiveContains(trimmed)
                 || $0.plainBody.localizedCaseInsensitiveContains(trimmed)
+                || $0.tags.contains(where: { $0.localizedCaseInsensitiveContains(trimmed) })
             }
             .sorted { $0.updatedAt > $1.updatedAt }
     }
@@ -67,6 +80,8 @@ final class NotesStore: ObservableObject {
     var selectedAttributedBody: NSAttributedString {
         selectedNote?.attributedBody ?? NSAttributedString(string: "", attributes: NSAttributedString.editorDefaultAttributes())
     }
+
+    // MARK: - Folder operations
 
     func createFolder(named rawName: String? = nil) {
         let name = uniqueName(base: rawName?.nonEmptyTrimmed ?? "New Project", existing: folders.map(\.name))
@@ -95,9 +110,20 @@ final class NotesStore: ObservableObject {
         scheduleSave()
     }
 
+    // MARK: - Note operations
+
     @discardableResult
     func createNote(title rawTitle: String? = nil, in folderID: UUID? = nil) -> UUID {
-        let targetFolderID = folderID ?? selectedFolderID
+        // Prefer explicit folderID arg, then current folder scope
+        let targetFolderID: UUID?
+        if let folderID {
+            targetFolderID = folderID
+        } else if case .folder(let id) = folderScope {
+            targetFolderID = id
+        } else {
+            targetFolderID = nil
+        }
+
         let note = BlueprintNote(
             folderID: targetFolderID,
             title: rawTitle?.nonEmptyTrimmed ?? "Untitled Note",
@@ -109,6 +135,7 @@ final class NotesStore: ObservableObject {
             folderScope = .folder(targetFolderID)
         }
         studyMode = false
+        shouldFocusTitle = true
         scheduleSave()
         return note.id
     }
@@ -127,23 +154,33 @@ final class NotesStore: ObservableObject {
     }
 
     func renameNote(_ noteID: UUID, to rawTitle: String) {
-        updateNote(noteID) { note in
-            note.title = rawTitle.nonEmptyTrimmed ?? "Untitled Note"
-        }
+        updateNote(noteID) { $0.title = rawTitle.nonEmptyTrimmed ?? "Untitled Note" }
     }
 
     func updateSelectedBody(_ attributedString: NSAttributedString) {
         guard let selectedNoteID else { return }
-        updateNote(selectedNoteID) { note in
-            note.bodyRTF = attributedString.rtfData()
-        }
+        updateNote(selectedNoteID) { $0.bodyRTF = attributedString.rtfData() }
     }
 
     func moveNote(_ noteID: UUID, to folderID: UUID?) {
-        updateNote(noteID) { note in
-            note.folderID = folderID
-        }
+        updateNote(noteID) { $0.folderID = folderID }
     }
+
+    // MARK: - Review & tagging
+
+    func markReviewed(_ noteID: UUID) {
+        updateNote(noteID) { $0.lastReviewedAt = Date() }
+    }
+
+    func updateTags(_ noteID: UUID, tags: [String]) {
+        updateNote(noteID) { $0.tags = tags }
+    }
+
+    func updateReviewInterval(_ noteID: UUID, days: Int) {
+        updateNote(noteID) { $0.reviewInterval = max(1, days) }
+    }
+
+    // MARK: - Selection & scope
 
     func selectFolderScope(_ scope: FolderScope) {
         folderScope = scope
@@ -162,6 +199,8 @@ final class NotesStore: ObservableObject {
         guard let folderID else { return "Unfiled" }
         return folders.first(where: { $0.id == folderID })?.name ?? "Missing Project"
     }
+
+    // MARK: - Private
 
     private func updateNote(_ noteID: UUID, mutation: (inout BlueprintNote) -> Void) {
         guard let index = notes.firstIndex(where: { $0.id == noteID }) else { return }
@@ -195,25 +234,47 @@ final class NotesStore: ObservableObject {
             lines: [
                 "• Identify the problem and gather symptoms.",
                 "• Establish a theory of probable cause.",
-                "• Test the theory, then document findings.",
+                "• Test the theory to confirm or deny, then escalate if needed.",
+                "• Establish a plan of action, implement it, and verify.",
+                "• Document findings, actions, and outcomes.",
                 "",
-                "Use highlights for command names, port numbers, and exam traps."
+                "Tip: use highlights for commands, port numbers, and exam traps."
             ]
         )
 
         let hardware = NSAttributedString(
-            markdownishSample: "Hardware Quick Review",
+            markdownishSample: "Hardware Symptoms Cheat Sheet",
             lines: [
-                "RAM, storage, power, and thermal symptoms often overlap.",
-                "Keep notes atomic enough to review quickly before practice tests."
+                "RAM issues: random crashes, BSODs, POST beep codes.",
+                "Storage failure: slow boot, clicking sounds, missing files.",
+                "Power issues: random shutdowns, won't POST, dead fans.",
+                "Thermal: throttling, shutdowns under load, excessive heat.",
+                "",
+                "Keep notes atomic — one concept per note works best for review."
             ]
         )
 
         folders = [aPlus, general]
         notes = [
-            BlueprintNote(folderID: aPlus.id, title: "Troubleshooting Methodology", body: troubleshooting),
-            BlueprintNote(folderID: aPlus.id, title: "Hardware Symptoms", body: hardware),
-            BlueprintNote(title: "Unfiled Scratch Note", body: NSAttributedString(string: "Drop this into a project when it has a home.", attributes: NSAttributedString.editorDefaultAttributes()))
+            BlueprintNote(
+                folderID: aPlus.id,
+                title: "Troubleshooting Methodology",
+                body: troubleshooting,
+                tags: ["5.0-troubleshooting"]
+            ),
+            BlueprintNote(
+                folderID: aPlus.id,
+                title: "Hardware Symptoms",
+                body: hardware,
+                tags: ["3.0-hardware"]
+            ),
+            BlueprintNote(
+                title: "Unfiled Scratch Note",
+                body: NSAttributedString(
+                    string: "Drop this into a project when it has a home.",
+                    attributes: NSAttributedString.editorDefaultAttributes()
+                )
+            )
         ]
         selectedNoteID = notes.first?.id
         folderScope = .folder(aPlus.id)
@@ -232,7 +293,6 @@ final class NotesStore: ObservableObject {
         saveTask = Task {
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
-
             do {
                 let data = try JSONEncoder.blueprint.encode(archive)
                 try FileManager.default.createDirectory(
@@ -249,9 +309,7 @@ final class NotesStore: ObservableObject {
     private func uniqueName(base: String, existing: [String]) -> String {
         guard existing.contains(base) else { return base }
         var counter = 2
-        while existing.contains("\(base) \(counter)") {
-            counter += 1
-        }
+        while existing.contains("\(base) \(counter)") { counter += 1 }
         return "\(base) \(counter)"
     }
 
