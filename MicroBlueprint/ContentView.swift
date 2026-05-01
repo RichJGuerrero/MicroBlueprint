@@ -116,11 +116,15 @@ private struct TopBar: View {
             .disabled(store.studyMode || store.selectedNote == nil)
 
             // Bullets — ⌘⌥L
-            Button(action: { editorController.toggleBullets() }) {
-                Image(systemName: "list.bullet").frame(width: 24, height: 24)
+            HStack(spacing: 2) {
+                Button(action: { editorController.toggleBullets() }) {
+                    Image(systemName: "list.bullet").frame(width: 24, height: 24)
+                }
+                .keyboardShortcut("l", modifiers: [.command, .option])
+                .help("Bullet list (⌘⌥L)")
+
+                BulletStyleMenu()
             }
-            .keyboardShortcut("l", modifiers: [.command, .option])
-            .help("Bullet list (⌘⌥L)")
             .disabled(store.studyMode || store.selectedNote == nil)
 
             // Highlight + color picker — ⌘⇧H
@@ -191,6 +195,39 @@ private struct HighlightColorMenu: View {
         .menuStyle(.button)
         .fixedSize()
         .help("Choose highlight color")
+    }
+}
+
+// MARK: - Bullet style picker
+
+private struct BulletStyleMenu: View {
+    @EnvironmentObject private var editorController: EditorController
+
+    var body: some View {
+        Menu {
+            ForEach(BulletStyle.allCases) { style in
+                Button {
+                    editorController.selectBulletStyle(style)
+                } label: {
+                    Label(
+                        style.title,
+                        systemImage: style == editorController.activeBulletStyle ? "checkmark.circle.fill" : "circle"
+                    )
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Text(editorController.activeBulletStyle == .bullet ? "•" : "-")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .frame(width: 9)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+            }
+            .frame(width: 25, height: 24)
+        }
+        .menuStyle(.button)
+        .fixedSize()
+        .help("Choose bullet style")
     }
 }
 

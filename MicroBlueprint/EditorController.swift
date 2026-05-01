@@ -32,10 +32,39 @@ enum HighlightColor: String, CaseIterable, Identifiable {
     }
 }
 
+enum BulletStyle: String, CaseIterable, Identifiable {
+    case bullet
+    case dash
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .bullet: "Bullet"
+        case .dash: "Dash"
+        }
+    }
+
+    var marker: String {
+        switch self {
+        case .bullet: "• "
+        case .dash: "- "
+        }
+    }
+
+    var opposite: BulletStyle {
+        switch self {
+        case .bullet: .dash
+        case .dash: .bullet
+        }
+    }
+}
+
 @MainActor
 final class EditorController: ObservableObject {
     weak var textView: NSTextView?
     @Published var activeHighlightColor: HighlightColor = .yellow
+    @Published var activeBulletStyle: BulletStyle = .bullet
 
     func focusEditor() {
         guard let textView else { return }
@@ -76,6 +105,10 @@ final class EditorController: ObservableObject {
 
     func selectHighlightColor(_ color: HighlightColor) {
         activeHighlightColor = color
+    }
+
+    func selectBulletStyle(_ style: BulletStyle) {
+        activeBulletStyle = style
     }
 
     func applyHighlight(_ color: HighlightColor) {
@@ -126,6 +159,11 @@ final class EditorController: ObservableObject {
     }
 
     func toggleBullets() {
+        toggleBullets(activeBulletStyle)
+    }
+
+    func toggleBullets(_ style: BulletStyle) {
+        activeBulletStyle = style
         guard let textView = editableTextView(), let storage = textView.textStorage else { return }
         let nsString = textView.string as NSString
         let selectedRange = textView.selectedRange()
@@ -143,18 +181,24 @@ final class EditorController: ObservableObject {
             cursor = NSMaxRange(line)
         } while cursor < mutableString.length
 
-        let allBulleted = !lineStarts.isEmpty && lineStarts.allSatisfy { start in
-            mutableString.substring(with: NSRange(location: start, length: min(2, mutableString.length - start))) == "• "
+        let currentLineStart = selectedRange.location - lineRange.location
+        let currentLineInfo = bulletInfo(in: mutableString, at: max(0, currentLineStart))
+        let allUsingStyle = !lineStarts.isEmpty && lineStarts.allSatisfy { start in
+            bulletInfo(in: mutableString, at: start)?.style == style
         }
 
         for start in lineStarts.reversed() {
-            if allBulleted {
-                mutable.deleteCharacters(in: NSRange(location: start, length: 2))
+            let info = bulletInfo(in: mutableString, at: start)
+            if allUsingStyle, let info {
+                mutable.deleteCharacters(in: info.markerRange)
+            } else if let info {
+                mutable.replaceCharacters(in: info.markerRange, with: style.marker)
             } else {
-                let attributes = start < mutable.length
-                    ? mutable.attributes(at: start, effectiveRange: nil)
+                let insertionPoint = bulletInsertionPoint(in: mutableString, at: start)
+                let attributes = insertionPoint < mutable.length
+                    ? mutable.attributes(at: insertionPoint, effectiveRange: nil)
                     : NSAttributedString.editorDefaultAttributes()
-                mutable.insert(NSAttributedString(string: "• ", attributes: attributes), at: start)
+                mutable.insert(NSAttributedString(string: style.marker, attributes: attributes), at: insertionPoint)
             }
         }
 
@@ -166,7 +210,16 @@ final class EditorController: ObservableObject {
 
         let selection: NSRange
         if selectedRange.length == 0 {
-            let offset = allBulleted ? -min(2, selectedRange.location - lineRange.location) : 2
+            let offset: Int
+            if allUsingStyle, let currentLineInfo {
+                offset = selectedRange.location - lineRange.location > currentLineInfo.markerRange.location
+                    ? -min(style.marker.count, selectedRange.location - lineRange.location - currentLineInfo.markerRange.location)
+                    : 0
+            } else if currentLineInfo == nil {
+                offset = style.marker.count
+            } else {
+                offset = 0
+            }
             selection = NSRange(location: max(lineRange.location, selectedRange.location + offset), length: 0)
         } else {
             selection = NSRange(location: lineRange.location, length: mutable.length)
@@ -307,6 +360,31 @@ final class EditorController: ObservableObject {
         let selection = clamped(range, to: textView.attributedString().length)
         textView.window?.makeFirstResponder(textView)
         textView.setSelectedRange(selection)
+    }
+
+    private func bulletInfo(in string: NSString, at lineStart: Int) -> (markerRange: NSRange, style: BulletStyle)? {
+        let insertionPoint = bulletInsertionPoint(in: string, at: lineStart)
+        for style in BulletStyle.allCases {
+            let markerLength = style.marker.count
+            guard insertionPoint + markerLength <= string.length else { continue }
+            if string.substring(with: NSRange(location: insertionPoint, length: markerLength)) == style.marker {
+                return (NSRange(location: insertionPoint, length: markerLength), style)
+            }
+        }
+        return nil
+    }
+
+    private func bulletInsertionPoint(in string: NSString, at lineStart: Int) -> Int {
+        var location = lineStart
+        while location < string.length {
+            let character = string.character(at: location)
+            if character == 32 || character == 9 {
+                location += 1
+            } else {
+                break
+            }
+        }
+        return location
     }
 
     private func convertedFont(_ font: NSFont, trait: NSFontTraitMask, enabled: Bool) -> NSFont {

@@ -113,6 +113,10 @@ private final class FocusableTextView: NSTextView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if shouldNestBulletList(for: event) {
+            return
+        }
+
         if shouldContinueBulletList(for: event) {
             return
         }
@@ -139,7 +143,7 @@ private final class FocusableTextView: NSTextView {
         menu.addItem(.separator())
         addFormattingItem("Heading", action: #selector(contextHeading), to: menu, enabled: hasSelection)
         addFormattingItem("Body Text", action: #selector(contextBodyText), to: menu, enabled: hasSelection)
-        addFormattingItem("Bullet List", action: #selector(contextBullets), to: menu, enabled: hasSelection)
+        addBulletMenu(to: menu)
 
         return menu
     }
@@ -174,6 +178,23 @@ private final class FocusableTextView: NSTextView {
         menu.addItem(highlightItem)
     }
 
+    private func addBulletMenu(to menu: NSMenu) {
+        let bulletItem = NSMenuItem(title: "Bullet List", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: "Bullet List")
+
+        for style in BulletStyle.allCases {
+            let item = NSMenuItem(title: style.title, action: #selector(contextApplyBulletStyle(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = style.rawValue
+            item.isEnabled = isEditable
+            submenu.addItem(item)
+        }
+
+        bulletItem.submenu = submenu
+        bulletItem.isEnabled = isEditable
+        menu.addItem(bulletItem)
+    }
+
     private func prepareForContextAction() {
         window?.makeFirstResponder(self)
         editorController?.textView = self
@@ -184,36 +205,112 @@ private final class FocusableTextView: NSTextView {
         guard isEditable,
               modifiers.isDisjoint(with: [.command, .control, .option]),
               event.charactersIgnoringModifiers == "\r",
-              string.isEmpty == false,
-              textStorage != nil else {
+              let textStorage,
+              let bulletLine = bulletLineInfo(at: selectedRange().location) else {
             return false
         }
 
         let selection = selectedRange()
-        let nsString = string as NSString
-        let lineRange = nsString.lineRange(for: NSRange(location: min(selection.location, nsString.length), length: 0))
-        guard nsString.substring(with: NSRange(location: lineRange.location, length: min(2, nsString.length - lineRange.location))) == "• " else {
-            return false
-        }
-
         let attributes: [NSAttributedString.Key: Any]
         if selection.location > 0 {
-            attributes = textStorage?.attributes(at: selection.location - 1, effectiveRange: nil) ?? typingAttributes
+            attributes = textStorage.attributes(at: selection.location - 1, effectiveRange: nil)
         } else {
             attributes = typingAttributes
         }
 
-        let insertedText = NSAttributedString(string: "\n• ", attributes: attributes)
+        let insertedText = NSAttributedString(
+            string: "\n\(bulletLine.indentation)\(bulletLine.style.marker)",
+            attributes: attributes
+        )
         guard shouldChangeText(in: selection, replacementString: insertedText.string) else {
             return true
         }
 
-        textStorage?.beginEditing()
-        textStorage?.replaceCharacters(in: selection, with: insertedText)
-        textStorage?.endEditing()
+        textStorage.beginEditing()
+        textStorage.replaceCharacters(in: selection, with: insertedText)
+        textStorage.endEditing()
         didChangeText()
         setSelectedRange(NSRange(location: selection.location + insertedText.length, length: 0))
         return true
+    }
+
+    private func shouldNestBulletList(for event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard isEditable,
+              modifiers.isEmpty,
+              event.charactersIgnoringModifiers == "\t",
+              selectedRange().length == 0,
+              let textStorage,
+              let bulletLine = bulletLineInfo(at: selectedRange().location) else {
+            return false
+        }
+
+        let nestedStyle = editorController?.activeBulletStyle.opposite ?? bulletLine.style.opposite
+        let replacementRange = NSRange(
+            location: bulletLine.lineRange.location,
+            length: NSMaxRange(bulletLine.markerRange) - bulletLine.lineRange.location
+        )
+        let replacementString = "\(bulletLine.indentation)    \(nestedStyle.marker)"
+        let attributes = textStorage.attributes(at: bulletLine.markerRange.location, effectiveRange: nil)
+        let replacementText = NSAttributedString(string: replacementString, attributes: attributes)
+
+        guard shouldChangeText(in: replacementRange, replacementString: replacementString) else {
+            return true
+        }
+
+        let selection = selectedRange()
+        let offset = replacementText.length - replacementRange.length
+        textStorage.beginEditing()
+        textStorage.replaceCharacters(in: replacementRange, with: replacementText)
+        textStorage.endEditing()
+        didChangeText()
+        setSelectedRange(NSRange(location: selection.location + max(0, offset), length: 0))
+        return true
+    }
+
+    private struct BulletLineInfo {
+        let lineRange: NSRange
+        let indentation: String
+        let markerRange: NSRange
+        let style: BulletStyle
+    }
+
+    private func bulletLineInfo(at location: Int) -> BulletLineInfo? {
+        let nsString = string as NSString
+        guard nsString.length > 0 else { return nil }
+
+        let safeLocation = min(location, nsString.length)
+        let lineRange = nsString.lineRange(for: NSRange(location: safeLocation, length: 0))
+        var markerLocation = lineRange.location
+
+        while markerLocation < NSMaxRange(lineRange), markerLocation < nsString.length {
+            let character = nsString.character(at: markerLocation)
+            if character == 32 || character == 9 {
+                markerLocation += 1
+            } else {
+                break
+            }
+        }
+
+        let indentationLength = markerLocation - lineRange.location
+        let indentation = indentationLength > 0
+            ? nsString.substring(with: NSRange(location: lineRange.location, length: indentationLength))
+            : ""
+
+        for style in BulletStyle.allCases {
+            let markerLength = style.marker.count
+            guard markerLocation + markerLength <= nsString.length else { continue }
+            if nsString.substring(with: NSRange(location: markerLocation, length: markerLength)) == style.marker {
+                return BulletLineInfo(
+                    lineRange: lineRange,
+                    indentation: indentation,
+                    markerRange: NSRange(location: markerLocation, length: markerLength),
+                    style: style
+                )
+            }
+        }
+
+        return nil
     }
 
     @objc private func contextBold() {
@@ -256,5 +353,12 @@ private final class FocusableTextView: NSTextView {
     @objc private func contextBullets() {
         prepareForContextAction()
         editorController?.toggleBullets()
+    }
+
+    @objc private func contextApplyBulletStyle(_ sender: NSMenuItem) {
+        prepareForContextAction()
+        guard let rawValue = sender.representedObject as? String,
+              let style = BulletStyle(rawValue: rawValue) else { return }
+        editorController?.toggleBullets(style)
     }
 }
