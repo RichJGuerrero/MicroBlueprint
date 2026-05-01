@@ -40,6 +40,14 @@ struct RichTextEditor: NSViewRepresentable {
         textView.textStorage?.setAttributedString(attributedText)
         textView.editorController = editorController
 
+        // Spell and grammar checking — native red/green underlines.
+        // Autocorrect is intentionally left OFF so the app never silently rewrites notes.
+        // The retroactive scan of already-loaded text happens in viewDidMoveToWindow,
+        // once the view is attached to a window and the text system is fully ready.
+        textView.isContinuousSpellCheckingEnabled = isEditable
+        textView.isGrammarCheckingEnabled = isEditable
+        textView.isAutomaticSpellingCorrectionEnabled = false
+
         scrollView.documentView = textView
         editorController.textView = textView
         return scrollView
@@ -50,8 +58,14 @@ struct RichTextEditor: NSViewRepresentable {
         context.coordinator.parent = self
         editorController.textView = textView
         (textView as? FocusableTextView)?.editorController = editorController
+
+        // Keep edit state in sync. Track whether spell checking was previously active
+        // so we know when to run a retroactive scan after re-entering edit mode.
+        let wasSpellCheckEnabled = textView.isContinuousSpellCheckingEnabled
         textView.isEditable = isEditable
         textView.isSelectable = true
+        textView.isContinuousSpellCheckingEnabled = isEditable
+        textView.isGrammarCheckingEnabled = isEditable
 
         if !context.coordinator.isUpdatingFromTextView,
            textView.attributedString().isEqual(to: attributedText) == false {
@@ -61,6 +75,13 @@ struct RichTextEditor: NSViewRepresentable {
                 location: min(selection.location, attributedText.length),
                 length: min(selection.length, max(0, attributedText.length - min(selection.location, attributedText.length)))
             ))
+            // New note loaded — run a full retroactive scan so existing content gets underlines.
+            if isEditable {
+                DispatchQueue.main.async { textView.checkTextInDocument(nil) }
+            }
+        } else if isEditable && !wasSpellCheckEnabled {
+            // Returning from Study Mode — restore underlines on the current note.
+            DispatchQueue.main.async { textView.checkTextInDocument(nil) }
         }
     }
 
@@ -105,6 +126,14 @@ private final class FocusableTextView: NSTextView {
 
     override func becomeFirstResponder() -> Bool {
         super.becomeFirstResponder()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // The first time this view lands in a window, run a full spell/grammar scan
+        // so text that was loaded before the window existed gets its underlines.
+        guard window != nil, isContinuousSpellCheckingEnabled else { return }
+        checkTextInDocument(nil)
     }
 
     override func mouseDown(with event: NSEvent) {
