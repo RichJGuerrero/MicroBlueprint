@@ -134,23 +134,20 @@ final class EditorController: ObservableObject {
         let mutable = NSMutableAttributedString(attributedString: selectedLines)
         let mutableString = mutable.string as NSString
 
-        var starts: [Int] = []
+        var lineStarts: [Int] = []
         var cursor = 0
-        while cursor < mutableString.length {
-            starts.append(cursor)
+        repeat {
+            lineStarts.append(cursor)
+            guard cursor < mutableString.length else { break }
             let line = mutableString.lineRange(for: NSRange(location: cursor, length: 0))
             cursor = NSMaxRange(line)
-        }
+        } while cursor < mutableString.length
 
-        let nonEmptyStarts = starts.filter { start in
-            let line = mutableString.lineRange(for: NSRange(location: start, length: 0))
-            return mutableString.substring(with: line).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-        }
-        let allBulleted = !nonEmptyStarts.isEmpty && nonEmptyStarts.allSatisfy { start in
+        let allBulleted = !lineStarts.isEmpty && lineStarts.allSatisfy { start in
             mutableString.substring(with: NSRange(location: start, length: min(2, mutableString.length - start))) == "• "
         }
 
-        for start in nonEmptyStarts.reversed() {
+        for start in lineStarts.reversed() {
             if allBulleted {
                 mutable.deleteCharacters(in: NSRange(location: start, length: 2))
             } else {
@@ -166,7 +163,15 @@ final class EditorController: ObservableObject {
         storage.replaceCharacters(in: lineRange, with: mutable)
         storage.endEditing()
         textView.didChangeText()
-        restoreSelection(NSRange(location: lineRange.location, length: mutable.length), in: textView)
+
+        let selection: NSRange
+        if selectedRange.length == 0 {
+            let offset = allBulleted ? -min(2, selectedRange.location - lineRange.location) : 2
+            selection = NSRange(location: max(lineRange.location, selectedRange.location + offset), length: 0)
+        } else {
+            selection = NSRange(location: lineRange.location, length: mutable.length)
+        }
+        restoreSelection(selection, in: textView)
     }
 
     private func applyFont(size: CGFloat, weight: NSFont.Weight) {

@@ -112,6 +112,14 @@ private final class FocusableTextView: NSTextView {
         super.mouseDown(with: event)
     }
 
+    override func keyDown(with event: NSEvent) {
+        if shouldContinueBulletList(for: event) {
+            return
+        }
+
+        super.keyDown(with: event)
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         window?.makeFirstResponder(self)
 
@@ -169,6 +177,43 @@ private final class FocusableTextView: NSTextView {
     private func prepareForContextAction() {
         window?.makeFirstResponder(self)
         editorController?.textView = self
+    }
+
+    private func shouldContinueBulletList(for event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard isEditable,
+              modifiers.isDisjoint(with: [.command, .control, .option]),
+              event.charactersIgnoringModifiers == "\r",
+              string.isEmpty == false,
+              textStorage != nil else {
+            return false
+        }
+
+        let selection = selectedRange()
+        let nsString = string as NSString
+        let lineRange = nsString.lineRange(for: NSRange(location: min(selection.location, nsString.length), length: 0))
+        guard nsString.substring(with: NSRange(location: lineRange.location, length: min(2, nsString.length - lineRange.location))) == "• " else {
+            return false
+        }
+
+        let attributes: [NSAttributedString.Key: Any]
+        if selection.location > 0 {
+            attributes = textStorage?.attributes(at: selection.location - 1, effectiveRange: nil) ?? typingAttributes
+        } else {
+            attributes = typingAttributes
+        }
+
+        let insertedText = NSAttributedString(string: "\n• ", attributes: attributes)
+        guard shouldChangeText(in: selection, replacementString: insertedText.string) else {
+            return true
+        }
+
+        textStorage?.beginEditing()
+        textStorage?.replaceCharacters(in: selection, with: insertedText)
+        textStorage?.endEditing()
+        didChangeText()
+        setSelectedRange(NSRange(location: selection.location + insertedText.length, length: 0))
+        return true
     }
 
     @objc private func contextBold() {
