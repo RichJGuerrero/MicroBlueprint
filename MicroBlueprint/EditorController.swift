@@ -78,6 +78,11 @@ final class EditorController: ObservableObject {
         activeHighlightColor = color
     }
 
+    func applyHighlight(_ color: HighlightColor) {
+        activeHighlightColor = color
+        applyHighlightColor(color)
+    }
+
     func removeHighlight() {
         guard let textView = editableTextView(), let storage = textView.textStorage else { return }
         let range = effectiveSelection(in: textView)
@@ -90,6 +95,17 @@ final class EditorController: ObservableObject {
         }
         applyStorageEdit(to: textView, range: range) {
             storage.removeAttribute(.backgroundColor, range: range)
+        }
+    }
+
+    private func applyHighlightColor(_ color: HighlightColor) {
+        guard let textView = editableTextView(), let storage = textView.textStorage else { return }
+        let range = effectiveSelection(in: textView)
+        guard range.length > 0 else { return }
+
+        applyStorageEdit(to: textView, range: range) {
+            storage.removeAttribute(.backgroundColor, range: range)
+            storage.addAttribute(.backgroundColor, value: color.nsColor, range: range)
         }
     }
 
