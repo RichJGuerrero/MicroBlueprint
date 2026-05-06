@@ -187,6 +187,10 @@ private final class FocusableTextView: NSTextView {
             return
         }
 
+        if shouldUnNestBulletList(for: event) {
+            return
+        }
+
         super.keyDown(with: event)
     }
 
@@ -332,6 +336,106 @@ private final class FocusableTextView: NSTextView {
         didChangeText()
         setSelectedRange(NSRange(location: selection.location + max(0, offset), length: 0))
         return true
+    }
+
+    /// Backspace at the typing position of an indented bullet snaps back one indentation
+    /// level instead of requiring the user to delete characters one by one.
+    ///
+    /// Trigger conditions:
+    ///   • Plain Backspace (no ⌘ / ⌥ / ⌃ modifier — those have their own delete semantics)
+    ///   • Cursor is a caret (no selection)
+    ///   • The current line is an indented bullet (at least one indentation level)
+    ///   • The caret sits exactly at the end of the indent + marker prefix
+    ///     (i.e. the "typing position" — nothing has been typed on this line yet,
+    ///      or the user has moved the cursor back to the very start of the content area)
+    private func shouldUnNestBulletList(for event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard isEditable,
+              modifiers.isDisjoint(with: [.command, .control, .option]),
+              event.keyCode == 51,             // Backspace key
+              selectedRange().length == 0,     // caret, not a selection
+              let textStorage,
+              let bulletLine = bulletLineInfo(at: selectedRange().location),
+              !bulletLine.indentation.isEmpty  // must be a nested (indented) bullet
+        else { return false }
+
+        // Only intercept when the caret is exactly at the end of the indent+marker —
+        // i.e. nothing has been typed yet on this line.
+        let markerEnd = NSMaxRange(bulletLine.markerRange)
+        guard selectedRange().location == markerEnd else { return false }
+
+        // Step back one indentation level (remove up to 4 spaces from the end of the
+        // indentation string, matching what shouldNestBulletList adds).
+        let trimCount = min(4, bulletLine.indentation.count)
+        let parentIndent = String(bulletLine.indentation.dropLast(trimCount))
+
+        // Look up what bullet style the parent indentation level is actually using,
+        // so • lists un-nest to • and - lists un-nest to -.
+        let parentStyle = bulletStyle(forIndentation: parentIndent) ?? bulletLine.style
+        let newPrefix = "\(parentIndent)\(parentStyle.marker)"
+
+        // Replace the entire indent+marker span with the shorter parent-level prefix.
+        let replacementRange = NSRange(
+            location: bulletLine.lineRange.location,
+            length: markerEnd - bulletLine.lineRange.location
+        )
+        let attributes = textStorage.attributes(
+            at: bulletLine.markerRange.location, effectiveRange: nil
+        )
+        let replacementText = NSAttributedString(string: newPrefix, attributes: attributes)
+
+        guard shouldChangeText(in: replacementRange, replacementString: newPrefix) else {
+            return true
+        }
+
+        textStorage.beginEditing()
+        textStorage.replaceCharacters(in: replacementRange, with: replacementText)
+        textStorage.endEditing()
+        didChangeText()
+
+        // Land the caret right after the new (shorter) marker.
+        setSelectedRange(NSRange(
+            location: bulletLine.lineRange.location + newPrefix.count,
+            length: 0
+        ))
+        return true
+    }
+
+    /// Scans the document outward from the current cursor position to find the first
+    /// bullet line whose indentation exactly matches `indentation`, and returns its style.
+    /// Searches backwards first (the parent is almost always above), then forwards.
+    /// Returns nil if no matching bullet line exists (caller should fall back to a default).
+    private func bulletStyle(forIndentation indentation: String) -> BulletStyle? {
+        let nsString = string as NSString
+        let cursorLoc = selectedRange().location
+
+        // ── Search backwards ──────────────────────────────────────────────────
+        var searchLoc = cursorLoc
+        while searchLoc > 0 {
+            // Step to the start of the previous line.
+            let prevLineRange = nsString.lineRange(for: NSRange(location: searchLoc - 1, length: 0))
+            if let info = bulletLineInfo(at: prevLineRange.location),
+               info.indentation == indentation {
+                return info.style
+            }
+            if prevLineRange.location == 0 { break }
+            searchLoc = prevLineRange.location
+        }
+
+        // ── Search forwards (fallback) ────────────────────────────────────────
+        searchLoc = cursorLoc
+        while searchLoc < nsString.length {
+            let lineRange = nsString.lineRange(for: NSRange(location: searchLoc, length: 0))
+            if let info = bulletLineInfo(at: lineRange.location),
+               info.indentation == indentation {
+                return info.style
+            }
+            let next = NSMaxRange(lineRange)
+            if next <= searchLoc { break }   // guard against zero-length line loops
+            searchLoc = next
+        }
+
+        return nil
     }
 
     private struct BulletLineInfo {
