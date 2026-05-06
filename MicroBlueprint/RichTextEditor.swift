@@ -50,6 +50,13 @@ struct RichTextEditor: NSViewRepresentable {
 
         scrollView.documentView = textView
         editorController.textView = textView
+
+        // Keep the cursor at least 80 pt above the bottom of the visible area.
+        // NSScrollView.contentInsets shrinks the clip rectangle so that
+        // scrollRangeToVisible treats the last 80 pt as out-of-bounds and
+        // automatically scrolls up to compensate — no extra delegate work needed.
+        scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 80, right: 0)
+
         return scrollView
     }
 
@@ -139,6 +146,36 @@ private final class FocusableTextView: NSTextView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         super.mouseDown(with: event)
+    }
+
+    /// Ensures the cursor is never flush with the bottom of the visible area.
+    /// The 80 pt contentInsets.bottom handles most cases; this catches edge cases
+    /// like the first keypress on a very long note that hasn't scrolled yet.
+    override func scrollRangeToVisible(_ range: NSRange) {
+        super.scrollRangeToVisible(range)
+        guard let scrollView = enclosingScrollView,
+              let layoutManager,
+              let textContainer else { return }
+
+        let safeLen = textStorage?.length ?? 0
+        let loc = min(range.location, safeLen)
+        let len = min(range.length, max(0, safeLen - loc))
+        guard loc != NSNotFound else { return }
+
+        let glyphRange = layoutManager.glyphRange(
+            forCharacterRange: NSRange(location: loc, length: len),
+            actualCharacterRange: nil
+        )
+        let glyphRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+        let o = textContainerOrigin
+        let cursorBottom = glyphRect.maxY + o.y
+
+        let visible = scrollView.documentVisibleRect
+        let buffer: CGFloat = 80
+        if cursorBottom + buffer > visible.maxY {
+            let newY = max(0, cursorBottom + buffer - visible.height)
+            enclosingScrollView?.documentView?.scroll(NSPoint(x: 0, y: newY))
+        }
     }
 
     override func keyDown(with event: NSEvent) {
