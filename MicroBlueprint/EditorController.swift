@@ -92,7 +92,7 @@ final class EditorController: ObservableObject {
     }
 
     func heading() {
-        applyFont(size: 26, weight: .semibold)
+        applyFont(size: 26, weight: .bold)
     }
 
     func bodySize() {
@@ -396,10 +396,11 @@ final class EditorController: ObservableObject {
 
     private func sizedFont(from font: NSFont?, size: CGFloat, weight: NSFont.Weight) -> NSFont {
         let traits = font.map { NSFontManager.shared.traits(of: $0) } ?? []
+        // Bold is dictated entirely by the weight parameter — heading forces bold,
+        // body forces regular.  Don't re-apply the existing bold trait here or the
+        // two styles can't reliably toggle each other.
+        // Italic is a user intent separate from the text style, so it is preserved.
         var sized = NSFont.systemFont(ofSize: size, weight: weight)
-        if traits.contains(.boldFontMask) {
-            sized = NSFontManager.shared.convert(sized, toHaveTrait: .boldFontMask)
-        }
         if traits.contains(.italicFontMask) {
             sized = NSFontManager.shared.convert(sized, toHaveTrait: .italicFontMask)
         }
