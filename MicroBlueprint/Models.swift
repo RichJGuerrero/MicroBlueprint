@@ -121,7 +121,13 @@ extension NSAttributedString {
     }
 
     convenience init(rtfData: Data) {
-        if let decoded = try? NSAttributedString(
+        // Prefer NSKeyedArchiver (new format — preserves custom attributes like .imageData).
+        // Fall back to plain RTF for notes saved before the format switch.
+        if let decoded = try? NSKeyedUnarchiver.unarchivedObject(
+            ofClass: NSAttributedString.self, from: rtfData
+        ) {
+            self.init(attributedString: decoded)
+        } else if let decoded = try? NSAttributedString(
             data: rtfData,
             options: [.documentType: NSAttributedString.DocumentType.rtf],
             documentAttributes: nil
@@ -151,14 +157,9 @@ extension NSAttributedString {
     }
 
     func rtfData() -> Data {
-        guard length > 0 else {
-            return (try? NSAttributedString(string: "", attributes: Self.editorDefaultAttributes())
-                .data(from: NSRange(location: 0, length: 0),
-                      documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])) ?? Data()
-        }
-        return (try? data(
-            from: NSRange(location: 0, length: length),
-            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
-        )) ?? Data()
+        // NSKeyedArchiver preserves all custom attributes (e.g. .imageData) that RTF
+        // would silently drop. Older notes stored as RTF are decoded transparently in
+        // init(rtfData:) via the RTF fallback path, then re-saved in this format.
+        (try? NSKeyedArchiver.archivedData(withRootObject: self, requiringSecureCoding: false)) ?? Data()
     }
 }

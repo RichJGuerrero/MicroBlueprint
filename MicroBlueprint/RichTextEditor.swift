@@ -19,7 +19,7 @@ struct RichTextEditor: NSViewRepresentable {
         let textView = FocusableTextView()
         textView.delegate = context.coordinator
         textView.isRichText = true
-        textView.importsGraphics = false
+        textView.importsGraphics = true
         textView.allowsUndo = true
         textView.usesFindPanel = true
         textView.usesFontPanel = true
@@ -66,29 +66,19 @@ struct RichTextEditor: NSViewRepresentable {
         editorController.textView = textView
         (textView as? FocusableTextView)?.editorController = editorController
 
-        // Keep edit state in sync. Track whether spell checking was previously active
-        // so we know when to run a retroactive scan after re-entering edit mode.
-        let wasSpellCheckEnabled = textView.isContinuousSpellCheckingEnabled
         textView.isEditable = isEditable
         textView.isSelectable = true
         textView.isContinuousSpellCheckingEnabled = isEditable
         textView.isGrammarCheckingEnabled = isEditable
 
         if !context.coordinator.isUpdatingFromTextView,
-           textView.attributedString().isEqual(to: attributedText) == false {
+           textView.attributedString().string != attributedText.string {
             let selection = textView.selectedRange()
             textView.textStorage?.setAttributedString(attributedText)
             textView.setSelectedRange(NSRange(
                 location: min(selection.location, attributedText.length),
                 length: min(selection.length, max(0, attributedText.length - min(selection.location, attributedText.length)))
             ))
-            // New note loaded — run a full retroactive scan so existing content gets underlines.
-            if isEditable {
-                DispatchQueue.main.async { textView.checkTextInDocument(nil) }
-            }
-        } else if isEditable && !wasSpellCheckEnabled {
-            // Returning from Study Mode — restore underlines on the current note.
-            DispatchQueue.main.async { textView.checkTextInDocument(nil) }
         }
     }
 
@@ -130,6 +120,9 @@ struct RichTextEditor: NSViewRepresentable {
 private final class FocusableTextView: NSTextView {
     weak var editorController: EditorController?
 
+    // At most one image preview panel open at a time.
+    private static weak var activePreviewPanel: NSPanel?
+
     override var acceptsFirstResponder: Bool {
         true
     }
@@ -144,15 +137,145 @@ private final class FocusableTextView: NSTextView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        // The first time this view lands in a window, run a full spell/grammar scan
-        // so text that was loaded before the window existed gets its underlines.
-        guard window != nil, isContinuousSpellCheckingEnabled else { return }
-        checkTextInDocument(nil)
     }
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        // If the click lands on an image link, open the preview and swallow the event
+        // so the cursor doesn't jump into the middle of the link text.
+        let point = convert(event.locationInWindow, from: nil)
+        if let data = imageData(atPoint: point) {
+            showImagePreview(data: data)
+            return
+        }
         super.mouseDown(with: event)
+    }
+
+    // MARK: - Image link insertion
+
+    /// Intercept Cmd-V paste before NSTextView embeds a raw NSTextAttachment.
+    override func paste(_ sender: Any?) {
+        if interceptImage(from: NSPasteboard.general) { return }
+        super.paste(sender)
+    }
+
+    /// Intercept drag-and-drop (images dragged from Finder, browsers, etc.).
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if interceptImage(from: sender.draggingPasteboard) { return true }
+        return super.performDragOperation(sender)
+    }
+
+    /// Shared helper: look for image data in a pasteboard and, if found, insert a
+    /// "📎 View Image" link instead of letting NSTextView create a raw attachment.
+    /// Returns true when it handled the image so the caller can skip `super`.
+    @discardableResult
+    private func interceptImage(from pboard: NSPasteboard) -> Bool {
+        // 1. Direct image data (screenshots, copied images from web/apps)
+        let imageTypes: [NSPasteboard.PasteboardType] = [.tiff, .png]
+        for type in imageTypes {
+            if let data = pboard.data(forType: type) {
+                insertImageLink(data: data)
+                return true
+            }
+        }
+        // 2. Image files dragged from Finder
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingContentsConformToTypes: ["public.image"]
+        ]
+        if let urls = pboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL],
+           let url = urls.first,
+           let data = try? Data(contentsOf: url),
+           NSImage(data: data) != nil {
+            insertImageLink(data: data)
+            return true
+        }
+        return false
+    }
+
+    /// Show a pointing-hand cursor over every image link in the document.
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard let textStorage,
+              let layoutManager,
+              let textContainer else { return }
+        let fullRange = NSRange(location: 0, length: textStorage.length)
+        textStorage.enumerateAttribute(.imageData, in: fullRange) { value, range, _ in
+            guard value != nil else { return }
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            rect.origin.x += textContainerOrigin.x
+            rect.origin.y += textContainerOrigin.y
+            addCursorRect(rect, cursor: .pointingHand)
+        }
+    }
+
+    // MARK: - Image link helpers
+
+    private func insertImageLink(data: Data) {
+        var attributes = typingAttributes
+        attributes[.foregroundColor] = NSColor.systemBlue
+        attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+        attributes[.imageData] = data as NSData
+        attributes.removeValue(forKey: .backgroundColor)
+
+        let linkText = "📎 View Image"
+        let linkString = NSAttributedString(string: linkText, attributes: attributes)
+        let selection = selectedRange()
+        guard let textStorage,
+              shouldChangeText(in: selection, replacementString: linkText) else { return }
+        textStorage.beginEditing()
+        textStorage.replaceCharacters(in: selection, with: linkString)
+        textStorage.endEditing()
+        didChangeText()
+        setSelectedRange(NSRange(location: selection.location + (linkText as NSString).length, length: 0))
+    }
+
+    private func imageData(atPoint point: NSPoint) -> Data? {
+        guard let layoutManager,
+              let textContainer,
+              let textStorage else { return nil }
+        let adjusted = NSPoint(
+            x: point.x - textContainerOrigin.x,
+            y: point.y - textContainerOrigin.y
+        )
+        let glyphIndex = layoutManager.glyphIndex(for: adjusted, in: textContainer)
+        let charIndex = layoutManager.characterIndexForGlyph(at: glyphIndex)
+        guard charIndex < textStorage.length else { return nil }
+        return textStorage.attribute(.imageData, at: charIndex, effectiveRange: nil) as? Data
+    }
+
+    private func showImagePreview(data: Data) {
+        FocusableTextView.activePreviewPanel?.close()
+        FocusableTextView.activePreviewPanel = nil
+
+        guard let image = NSImage(data: data) else { return }
+
+        // Size the panel proportionally to the image, capped at 800×600.
+        let maxSize = NSSize(width: 800, height: 600)
+        let imageSize = image.size
+        let scale = min(maxSize.width / max(imageSize.width, 1),
+                        maxSize.height / max(imageSize.height, 1),
+                        1.0)
+        let panelSize = NSSize(width: imageSize.width * scale,
+                               height: imageSize.height * scale)
+
+        let imageView = NSImageView(frame: NSRect(origin: .zero, size: panelSize))
+        imageView.image = image
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.imageAlignment = .alignCenter
+
+        let panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: panelSize),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Image Preview"
+        panel.contentView = imageView
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+
+        FocusableTextView.activePreviewPanel = panel
     }
 
     override func insertText(_ string: Any, replacementRange: NSRange) {
@@ -199,6 +322,10 @@ private final class FocusableTextView: NSTextView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if shouldDeleteImageLink(for: event) {
+            return
+        }
+
         if shouldNestBulletList(for: event) {
             return
         }
@@ -288,6 +415,48 @@ private final class FocusableTextView: NSTextView {
     private func prepareForContextAction() {
         window?.makeFirstResponder(self)
         editorController?.textView = self
+    }
+
+    /// Backspace immediately before (or anywhere inside) an image link deletes the
+    /// entire link in one keystroke instead of character by character.
+    private func shouldDeleteImageLink(for event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard isEditable,
+              modifiers.isDisjoint(with: [.command, .control, .option]),
+              event.keyCode == 51,           // Backspace
+              selectedRange().length == 0,   // caret only
+              let textStorage,
+              selectedRange().location > 0 else { return false }
+
+        let charBefore = selectedRange().location - 1
+
+        // Bail out early if the character before the cursor isn't part of an image link.
+        guard textStorage.attribute(.imageData, at: charBefore, effectiveRange: nil) != nil
+        else { return false }
+
+        // NSTextView's fixAttributes splits the attribute run at the emoji/text boundary
+        // due to font substitution (Apple Color Emoji vs. system font), so effectiveRange
+        // only covers one fragment. Scan character-by-character in both directions to find
+        // the true extent of the contiguous .imageData region.
+        var start = charBefore
+        while start > 0,
+              textStorage.attribute(.imageData, at: start - 1, effectiveRange: nil) != nil {
+            start -= 1
+        }
+        var end = charBefore + 1
+        while end < textStorage.length,
+              textStorage.attribute(.imageData, at: end, effectiveRange: nil) != nil {
+            end += 1
+        }
+
+        let linkRange = NSRange(location: start, length: end - start)
+        guard shouldChangeText(in: linkRange, replacementString: "") else { return true }
+        textStorage.beginEditing()
+        textStorage.deleteCharacters(in: linkRange)
+        textStorage.endEditing()
+        didChangeText()
+        setSelectedRange(NSRange(location: start, length: 0))
+        return true
     }
 
     private func shouldContinueBulletList(for event: NSEvent) -> Bool {
@@ -540,7 +709,7 @@ private final class FocusableTextView: NSTextView {
         editorController?.bodySize()
     }
 
-    @objc private func contextBullets() {
+    @objc private func contextBullets() {  // kept for any external bindings
         prepareForContextAction()
         editorController?.toggleBullets()
     }
@@ -551,4 +720,12 @@ private final class FocusableTextView: NSTextView {
               let style = BulletStyle(rawValue: rawValue) else { return }
         editorController?.toggleBullets(style)
     }
+}
+
+// MARK: - Custom attribute keys
+
+extension NSAttributedString.Key {
+    /// Carries raw image data (as NSData) for an image link inserted by MicroBlueprint.
+    /// NSData is NSCoding-compliant, so this attribute round-trips through NSKeyedArchiver.
+    static let imageData = NSAttributedString.Key("MicroBlueprint.imageData")
 }
