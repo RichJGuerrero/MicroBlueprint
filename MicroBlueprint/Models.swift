@@ -121,21 +121,31 @@ extension NSAttributedString {
     }
 
     convenience init(rtfData: Data) {
-        // Prefer NSKeyedArchiver (new format — preserves custom attributes like .imageData).
+        // Prefer NSKeyedArchiver (preserves custom attributes like .imageData).
         // Fall back to plain RTF for notes saved before the format switch.
-        if let decoded = try? NSKeyedUnarchiver.unarchivedObject(
+        let decoded: NSAttributedString?
+        if let d = try? NSKeyedUnarchiver.unarchivedObject(
             ofClass: NSAttributedString.self, from: rtfData
         ) {
-            self.init(attributedString: decoded)
-        } else if let decoded = try? NSAttributedString(
+            decoded = d
+        } else if let d = try? NSAttributedString(
             data: rtfData,
             options: [.documentType: NSAttributedString.DocumentType.rtf],
             documentAttributes: nil
         ) {
-            self.init(attributedString: decoded)
+            decoded = d
         } else {
-            self.init(string: "", attributes: Self.editorDefaultAttributes())
+            decoded = nil
         }
+
+        guard let decoded else {
+            self.init(string: "", attributes: Self.editorDefaultAttributes())
+            return
+        }
+
+        // Migrate any legacy inline NSData image payloads to on-disk UUID files.
+        // Notes that are already in the new format pass through unchanged (no-op).
+        self.init(attributedString: ImageFileStore.migratingInlineImages(in: decoded))
     }
 
     convenience init(markdownishSample title: String, lines: [String]) {

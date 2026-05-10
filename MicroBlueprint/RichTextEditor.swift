@@ -96,6 +96,8 @@ struct RichTextEditor: NSViewRepresentable {
             isUpdatingFromTextView = true
             parent.attributedText = NSAttributedString(attributedString: textView.attributedString())
             isUpdatingFromTextView = false
+            // Image-link rects may have changed — invalidate cache so resetCursorRects rebuilds.
+            (textView as? FocusableTextView)?.imageLinkRectsNeedRebuild = true
         }
 
         func textDidBeginEditing(_ notification: Notification) {
@@ -131,6 +133,12 @@ private final class FocusableTextView: NSTextView {
     // At most one image preview panel open at a time.
     private static weak var activePreviewPanel: NSPanel?
 
+    // Cursor-rect cache — rebuilt only when text changes, not on every scroll/resize.
+    var imageLinkRectsNeedRebuild = true
+    private var imageLinkCursorRects: [NSRect] = []
+
+    // Image file I/O is handled by ImageFileStore (see ImageFileStore.swift).
+
     override var acceptsFirstResponder: Bool {
         true
     }
@@ -152,7 +160,7 @@ private final class FocusableTextView: NSTextView {
         // If the click lands on an image link, open the preview and swallow the event
         // so the cursor doesn't jump into the middle of the link text.
         let point = convert(event.locationInWindow, from: nil)
-        if let data = imageData(atPoint: point) {
+        if let data = resolvedImageData(atPoint: point) {
             showImagePreview(data: data)
             return
         }
@@ -201,29 +209,51 @@ private final class FocusableTextView: NSTextView {
     }
 
     /// Show a pointing-hand cursor over every image link in the document.
+    /// Rebuilds the rect list only when text has changed; just replays the cache otherwise.
     override func resetCursorRects() {
         super.resetCursorRects()
+        if imageLinkRectsNeedRebuild {
+            rebuildImageLinkCursorRects()
+            imageLinkRectsNeedRebuild = false
+        }
+        for rect in imageLinkCursorRects {
+            addCursorRect(rect, cursor: .pointingHand)
+        }
+    }
+
+    private func rebuildImageLinkCursorRects() {
         guard let textStorage,
               let layoutManager,
-              let textContainer else { return }
+              let textContainer else {
+            imageLinkCursorRects = []
+            return
+        }
+        var rects: [NSRect] = []
         let fullRange = NSRange(location: 0, length: textStorage.length)
         textStorage.enumerateAttribute(.imageData, in: fullRange) { value, range, _ in
             guard value != nil else { return }
-            let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            let glyphRange = layoutManager.glyphRange(
+                forCharacterRange: range, actualCharacterRange: nil)
             var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
             rect.origin.x += textContainerOrigin.x
             rect.origin.y += textContainerOrigin.y
-            addCursorRect(rect, cursor: .pointingHand)
+            rects.append(rect)
         }
+        imageLinkCursorRects = rects
     }
 
     // MARK: - Image link helpers
 
     private func insertImageLink(data: Data) {
+        // Save the raw bytes to disk and store only the UUID in the attributed string.
+        // This keeps NSKeyedArchiver fast regardless of how many images are in a note —
+        // it serialises a tiny string instead of megabytes of pixel data.
+        guard let uuid = ImageFileStore.save(data) else { return }
+
         var attributes = typingAttributes
         attributes[.foregroundColor] = NSColor.systemBlue
         attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
-        attributes[.imageData] = data as NSData
+        attributes[.imageData] = uuid as NSString   // UUID string, NOT the raw bytes
         attributes.removeValue(forKey: .backgroundColor)
 
         let linkText = "📎 View Image"
@@ -254,7 +284,10 @@ private final class FocusableTextView: NSTextView {
         typingAttributes = attrs
     }
 
-    private func imageData(atPoint point: NSPoint) -> Data? {
+    /// Resolves the image data at a given point — looks up the UUID in the on-disk store.
+    /// Falls back to treating the attribute value as raw Data for any legacy notes that
+    /// were saved before the file-based storage switch.
+    private func resolvedImageData(atPoint point: NSPoint) -> Data? {
         guard let layoutManager,
               let textContainer,
               let textStorage else { return nil }
@@ -265,7 +298,12 @@ private final class FocusableTextView: NSTextView {
         let glyphIndex = layoutManager.glyphIndex(for: adjusted, in: textContainer)
         let charIndex = layoutManager.characterIndexForGlyph(at: glyphIndex)
         guard charIndex < textStorage.length else { return nil }
-        return textStorage.attribute(.imageData, at: charIndex, effectiveRange: nil) as? Data
+        let value = textStorage.attribute(.imageData, at: charIndex, effectiveRange: nil)
+        if let uuid = value as? String {
+            return ImageFileStore.load(uuid: uuid)
+        }
+        if let data = value as? Data { return data }   // legacy inline fallback
+        return nil
     }
 
     private func showImagePreview(data: Data) {
@@ -473,12 +511,20 @@ private final class FocusableTextView: NSTextView {
         }
 
         let linkRange = NSRange(location: start, length: end - start)
+
+        // Grab the UUID before deleting so we can clean up the image file.
+        let uuid = textStorage.attribute(.imageData, at: start, effectiveRange: nil) as? String
+
         guard shouldChangeText(in: linkRange, replacementString: "") else { return true }
         textStorage.beginEditing()
         textStorage.deleteCharacters(in: linkRange)
         textStorage.endEditing()
         didChangeText()
         setSelectedRange(NSRange(location: start, length: 0))
+
+        // Delete the on-disk file so images don't accumulate in App Support indefinitely.
+        if let uuid { ImageFileStore.delete(uuid: uuid) }
+
         return true
     }
 
