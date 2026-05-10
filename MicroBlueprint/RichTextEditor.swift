@@ -106,13 +106,21 @@ struct RichTextEditor: NSViewRepresentable {
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             parent.editorController.textView = textView
-            // Highlight is a deliberate selection-based action; the cursor should never
-            // carry it forward when it moves into or out of highlighted text.
-            if textView.typingAttributes[.backgroundColor] != nil {
-                var attrs = textView.typingAttributes
+            var attrs = textView.typingAttributes
+            var changed = false
+            // Highlight must never carry forward on cursor move.
+            if attrs[.backgroundColor] != nil {
                 attrs.removeValue(forKey: .backgroundColor)
-                textView.typingAttributes = attrs
+                changed = true
             }
+            // Image-link styling must never carry forward on cursor move.
+            if attrs[.imageData] != nil {
+                attrs.removeValue(forKey: .imageData)
+                attrs.removeValue(forKey: .underlineStyle)
+                attrs[.foregroundColor] = NSColor.labelColor
+                changed = true
+            }
+            if changed { textView.typingAttributes = attrs }
         }
     }
 }
@@ -228,6 +236,22 @@ private final class FocusableTextView: NSTextView {
         textStorage.endEditing()
         didChangeText()
         setSelectedRange(NSRange(location: selection.location + (linkText as NSString).length, length: 0))
+
+        // After insertion the cursor sits right after the link, so typingAttributes
+        // inherits the link's blue/underline/imageData. Strip them immediately so
+        // any text typed next (or a newline) comes out as normal unstyled text.
+        stripImageLinkTypingAttributes()
+    }
+
+    /// Removes image-link styling from typingAttributes without touching any other
+    /// attributes the user may have set (font size, bold, italic, etc.).
+    private func stripImageLinkTypingAttributes() {
+        guard typingAttributes[.imageData] != nil else { return }
+        var attrs = typingAttributes
+        attrs.removeValue(forKey: .imageData)
+        attrs.removeValue(forKey: .underlineStyle)
+        attrs[.foregroundColor] = NSColor.labelColor
+        typingAttributes = attrs
     }
 
     private func imageData(atPoint point: NSPoint) -> Data? {
@@ -280,14 +304,13 @@ private final class FocusableTextView: NSTextView {
 
     override func insertText(_ string: Any, replacementRange: NSRange) {
         // Highlight must never bleed into freshly typed characters or newlines.
-        // NSTextView sets typingAttributes from the text immediately before the
-        // cursor, so if that text is highlighted the next character would inherit
-        // the background colour. Strip it here, before the character lands.
         if typingAttributes[.backgroundColor] != nil {
             var attrs = typingAttributes
             attrs.removeValue(forKey: .backgroundColor)
             typingAttributes = attrs
         }
+        // Image-link styling must never bleed into typed text either.
+        stripImageLinkTypingAttributes()
         super.insertText(string, replacementRange: replacementRange)
     }
 
